@@ -21,6 +21,7 @@ from unittest.mock import MagicMock, patch
 import pytest
 
 
+@patch("superset.views.base._get_user_roles_hash", return_value="abc123")
 @patch("superset.views.base.utils.get_user_id", return_value=1)
 @patch(
     "superset.views.base.cached_common_bootstrap_data", return_value={"test": "data"}
@@ -30,6 +31,7 @@ def test_common_bootstrap_payload_converts_locale_to_string(
     mock_get_locale: MagicMock,
     mock_cached: MagicMock,
     mock_user_id: MagicMock,
+    mock_roles_hash: MagicMock,
 ) -> None:
     """Test that common_bootstrap_payload converts locale to string for cache key"""
 
@@ -46,11 +48,12 @@ def test_common_bootstrap_payload_converts_locale_to_string(
 
     result = common_bootstrap_payload()
 
-    # Verify cached_common_bootstrap_data was called with string locale
-    mock_cached.assert_called_once_with(1, "de_DE")
+    # Verify cached_common_bootstrap_data was called with string locale and roles_hash
+    mock_cached.assert_called_once_with(1, "de_DE", "abc123")
     assert result == {"test": "data"}
 
 
+@patch("superset.views.base._get_user_roles_hash", return_value="abc123")
 @patch("superset.views.base.utils.get_user_id", return_value=1)
 @patch(
     "superset.views.base.cached_common_bootstrap_data", return_value={"test": "data"}
@@ -60,13 +63,74 @@ def test_common_bootstrap_payload_handles_none_locale(
     mock_get_locale: MagicMock,
     mock_cached: MagicMock,
     mock_user_id: MagicMock,
+    mock_roles_hash: MagicMock,
 ) -> None:
     """Test that None locale is passed through correctly"""
     from superset.views.base import common_bootstrap_payload
 
     common_bootstrap_payload()
 
-    mock_cached.assert_called_once_with(1, None)
+    mock_cached.assert_called_once_with(1, None, "abc123")
+
+
+@patch("superset.views.base.g")
+def test_get_user_roles_hash_changes_with_roles(mock_g: MagicMock) -> None:
+    """Cache key changes when user roles change"""
+    from superset.views.base import _get_user_roles_hash
+
+    role_a = MagicMock(id=1)
+    role_b = MagicMock(id=2)
+    role_c = MagicMock(id=3)
+
+    mock_g.user.roles = [role_a, role_b]
+    hash_ab = _get_user_roles_hash()
+
+    mock_g.user.roles = [role_a, role_b, role_c]
+    hash_abc = _get_user_roles_hash()
+
+    mock_g.user.roles = [role_a, role_b]
+    hash_ab_again = _get_user_roles_hash()
+
+    assert hash_ab != hash_abc
+    assert hash_ab == hash_ab_again
+
+
+@patch("superset.views.base.g")
+def test_get_user_roles_hash_order_independent(mock_g: MagicMock) -> None:
+    """Hash is stable regardless of role ordering"""
+    from superset.views.base import _get_user_roles_hash
+
+    role_a = MagicMock(id=1)
+    role_b = MagicMock(id=2)
+
+    mock_g.user.roles = [role_a, role_b]
+    hash_1 = _get_user_roles_hash()
+
+    mock_g.user.roles = [role_b, role_a]
+    hash_2 = _get_user_roles_hash()
+
+    assert hash_1 == hash_2
+
+
+@patch("superset.views.base.g")
+def test_get_user_roles_hash_handles_no_roles(mock_g: MagicMock) -> None:
+    """Hash handles user with no roles gracefully"""
+    from superset.views.base import _get_user_roles_hash
+
+    mock_g.user.roles = []
+    hash_empty = _get_user_roles_hash()
+    assert isinstance(hash_empty, str)
+    assert len(hash_empty) > 0
+
+
+@patch("superset.views.base.g")
+def test_get_user_roles_hash_handles_missing_user(mock_g: MagicMock) -> None:
+    """Hash handles missing user attribute gracefully"""
+    from superset.views.base import _get_user_roles_hash
+
+    mock_g.user = MagicMock(spec=[])  # no 'roles' attribute
+    hash_val = _get_user_roles_hash()
+    assert isinstance(hash_val, str)
 
 
 def _extract_language(
