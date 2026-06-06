@@ -18,6 +18,7 @@ from __future__ import annotations
 
 import hashlib
 import logging
+import time
 from typing import Any, Callable, Optional, TYPE_CHECKING, Union
 
 from flask import current_app, Flask
@@ -33,6 +34,22 @@ if TYPE_CHECKING:
     )
 
 logger = logging.getLogger(__name__)
+
+# Redis-based CACHE_TYPE values that benefit from failover resilience settings
+_REDIS_CACHE_TYPES = frozenset(
+    {"RedisCache", "RedisSentinelCache", "RedisClusterCache"}
+)
+
+# Default health check interval (seconds) for redis-py connection pool validation.
+# redis-py will send a PING before reusing a connection that has been idle longer
+# than this interval, detecting dead connections from failover events.
+_DEFAULT_HEALTH_CHECK_INTERVAL = 10
+
+# Default socket timeout (seconds) for Redis operations.
+_DEFAULT_SOCKET_TIMEOUT = 5
+
+# Default socket connect timeout (seconds).
+_DEFAULT_SOCKET_CONNECT_TIMEOUT = 3
 
 CACHE_IMPORT_PATH = "superset.extensions.metastore_cache.SupersetMetastoreCache"
 
@@ -198,6 +215,52 @@ class CacheManager:
         ) = None
 
     @staticmethod
+    def _apply_redis_failover_defaults(cache_config: dict[str, Any]) -> None:
+        """Inject failover-resilient defaults into CACHE_OPTIONS for Redis backends.
+
+        When a Redis Cluster or Sentinel failover occurs, connections in the pool
+        may point to a demoted replica. redis-py's ``health_check_interval``
+        causes a PING before reusing idle connections, quickly detecting dead
+        sockets. ``socket_timeout`` and ``socket_connect_timeout`` bound how long
+        the client waits on unresponsive nodes. ``retry_on_error`` enables
+        automatic retry for transient connection errors during failover.
+
+        These defaults are only applied when not already set by the operator.
+        """
+        options: dict[str, Any] = cache_config.setdefault("CACHE_OPTIONS", {})
+
+        options.setdefault("health_check_interval", _DEFAULT_HEALTH_CHECK_INTERVAL)
+        options.setdefault("socket_timeout", _DEFAULT_SOCKET_TIMEOUT)
+        options.setdefault("socket_connect_timeout", _DEFAULT_SOCKET_CONNECT_TIMEOUT)
+
+        if "retry_on_error" not in options:
+            try:
+                from redis.exceptions import (
+                    BusyLoadingError,
+                    ConnectionError as RedisConnectionError,
+                    TimeoutError as RedisTimeoutError,
+                )
+
+                options["retry_on_error"] = [
+                    RedisConnectionError,
+                    RedisTimeoutError,
+                    BusyLoadingError,
+                ]
+            except ImportError:
+                pass
+
+        if "retry" not in options:
+            try:
+                from redis.backoff import ExponentialBackoff
+                from redis.retry import Retry
+
+                options["retry"] = Retry(
+                    ExponentialBackoff(cap=0.5, base=0.1), retries=3
+                )
+            except ImportError:
+                pass
+
+    @staticmethod
     def _init_cache(
         app: Flask, cache: Cache, cache_config_key: str, required: bool = False
     ) -> None:
@@ -221,6 +284,21 @@ class CacheManager:
         if cache_type is not None and "CACHE_DEFAULT_TIMEOUT" not in cache_config:
             default_timeout = app.config.get("CACHE_DEFAULT_TIMEOUT")
             cache_config["CACHE_DEFAULT_TIMEOUT"] = default_timeout
+
+        # Inject failover-resilient defaults for Redis-based backends
+        if cache_type in _REDIS_CACHE_TYPES:
+            CacheManager._apply_redis_failover_defaults(cache_config)
+            logger.info(
+                "Redis failover resilience enabled for %s "
+                "(health_check_interval=%ds, socket_timeout=%ds)",
+                cache_config_key,
+                cache_config.get("CACHE_OPTIONS", {}).get(
+                    "health_check_interval", _DEFAULT_HEALTH_CHECK_INTERVAL
+                ),
+                cache_config.get("CACHE_OPTIONS", {}).get(
+                    "socket_timeout", _DEFAULT_SOCKET_TIMEOUT
+                ),
+            )
 
         cache.init_app(app, cache_config)
 
@@ -307,3 +385,51 @@ class CacheManager:
         Returns None if DISTRIBUTED_COORDINATION_CONFIG is not configured.
         """
         return self._distributed_coordination
+
+    def check_cache_health(self) -> dict[str, bool]:
+        """Verify connectivity to all configured cache backends.
+
+        Returns a dict mapping cache name to health status. Logs warnings for
+        any backend that fails the health check, which may indicate a Redis
+        failover event or network partition.
+        """
+        results: dict[str, bool] = {}
+        caches = {
+            "cache": self._cache,
+            "data_cache": self._data_cache,
+            "thumbnail_cache": self._thumbnail_cache,
+            "filter_state_cache": self._filter_state_cache,
+            "explore_form_data_cache": self._explore_form_data_cache,
+        }
+
+        for name, cache_instance in caches.items():
+            try:
+                backend = cache_instance.cache
+                # NullCache and metastore backends don't have a Redis client
+                redis_client = getattr(backend, "_write_client", None)
+                if redis_client is not None and hasattr(redis_client, "ping"):
+                    start = time.monotonic()
+                    redis_client.ping()
+                    latency_ms = (time.monotonic() - start) * 1000
+                    results[name] = True
+                    if latency_ms > 100:
+                        logger.warning(
+                            "Cache health check slow for %s: %.1fms "
+                            "(possible failover or network issue)",
+                            name,
+                            latency_ms,
+                        )
+                else:
+                    # Non-Redis backend, assume healthy
+                    results[name] = True
+            except Exception:
+                results[name] = False
+                logger.warning(
+                    "Cache health check FAILED for %s — potential Redis failover "
+                    "or connectivity issue. Stale reads may occur until "
+                    "connection pool recovers.",
+                    name,
+                    exc_info=True,
+                )
+
+        return results

@@ -1125,6 +1125,26 @@ CACHE_CONFIG: CacheConfig = {"CACHE_TYPE": "NullCache"}
 # Cache for datasource metadata and query results
 DATA_CACHE_CONFIG: CacheConfig = {"CACHE_TYPE": "NullCache"}
 
+# Redis failover resilience:
+# When using Redis-based cache backends (RedisCache, RedisSentinelCache,
+# RedisClusterCache), Superset automatically injects the following CACHE_OPTIONS
+# defaults to improve resilience during Redis failover events:
+#   - health_check_interval: 10  (seconds between PING on idle connections)
+#   - socket_timeout: 5          (seconds before a stalled read/write times out)
+#   - socket_connect_timeout: 3  (seconds before a connection attempt times out)
+#   - retry_on_error: [ConnectionError, TimeoutError, BusyLoadingError]
+#   - retry: Retry(ExponentialBackoff(cap=0.5, base=0.1), retries=3)
+#
+# To override these defaults, set CACHE_OPTIONS in your cache config dict:
+#   CACHE_CONFIG = {
+#       "CACHE_TYPE": "RedisCache",
+#       "CACHE_REDIS_URL": "redis://...",
+#       "CACHE_OPTIONS": {
+#           "health_check_interval": 30,
+#           "socket_timeout": 10,
+#       },
+#   }
+
 # Cache for dashboard filter state. `CACHE_TYPE` defaults to `SupersetMetastoreCache`
 # that stores the values in the key-value table in the Superset metastore, as it's
 # required for Superset to operate correctly, but can be replaced by any
