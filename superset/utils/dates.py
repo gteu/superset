@@ -14,21 +14,19 @@
 # KIND, either express or implied.  See the License for the
 # specific language governing permissions and limitations
 # under the License.
-from datetime import datetime
+from datetime import datetime, timezone
 
-import pytz
-
-EPOCH = datetime(1970, 1, 1)
+EPOCH = datetime(1970, 1, 1, tzinfo=timezone.utc)
 
 
 def datetime_to_epoch(dttm: datetime) -> float:
     """Convert datetime to milliseconds to epoch"""
     if dttm.tzinfo:
-        dttm = dttm.astimezone(pytz.utc)
-        epoch_with_tz = pytz.utc.localize(EPOCH)
-        return (dttm - epoch_with_tz).total_seconds() * 1000
+        dttm = dttm.astimezone(timezone.utc)
+    else:
+        dttm = dttm.replace(tzinfo=timezone.utc)
     return (dttm - EPOCH).total_seconds() * 1000
 
 
 def now_as_float() -> float:
-    return datetime_to_epoch(datetime.utcnow())
+    return datetime_to_epoch(datetime.now(timezone.utc))
