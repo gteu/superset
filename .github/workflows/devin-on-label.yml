@@ -68,11 +68,13 @@ jobs:
             --arg title "Issue #${ISSUE_NUM}: ${ISSUE_TITLE}" \
             --arg playbook_id "$PLAYBOOK_ID" \
             --arg knowledge_id "$KNOWLEDGE_ID" \
+            --arg repo "${{ github.repository }}" \
+            --arg issue_tag "issue:${ISSUE_NUM}" \
             '{
               prompt: $prompt,
               title: $title,
-              repos: ["${{ github.repository }}"],
-              tags: ["maintenance", "automated", "repo:${{ github.repository }}", "issue:\($ISSUE_NUM)"],
+              repos: [$repo],
+              tags: ["maintenance", "automated", ("repo:" + $repo), $issue_tag],
               max_acu_limit: 50,
               structured_output_schema: {
                 "type": "object",
