@@ -13,55 +13,90 @@ jobs:
     if: ${{ github.event.label.name == 'devin-ready' }}
     runs-on: ubuntu-latest
     steps:
-      - name: Checkout repository
-        uses: actions/checkout@v4
-
-      - name: Set up Python
-        uses: actions/setup-python@v5
-        with:
-          python-version: "3.11"
-
-      - name: Install dependencies
-        run: pip install pydantic pydantic-settings httpx
-
       - name: Run policy engine and dispatch
         id: dispatch
         env:
-          DEVIN_API_KEY: ${{ secrets.DEVIN_API_KEY }}
-          DEVIN_ORG_ID: ${{ secrets.DEVIN_ORG_ID }}
-          DEVIN_PLAYBOOK_ID: ${{ secrets.DEVIN_PLAYBOOK_ID }}
-          DEVIN_PLAYBOOK_ID_DEEP: ${{ secrets.DEVIN_PLAYBOOK_ID_DEEP }}
-          DEVIN_KNOWLEDGE_ID: ${{ secrets.DEVIN_KNOWLEDGE_ID }}
-          DEVIN_KNOWLEDGE_ID_TESTING: ${{ secrets.DEVIN_KNOWLEDGE_ID_TESTING }}
-          DEVIN_KNOWLEDGE_ID_SECURITY: ${{ secrets.DEVIN_KNOWLEDGE_ID_SECURITY }}
-          GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
-          GITHUB_REPO: ${{ github.repository }}
-          ISSUE_NUMBER: ${{ github.event.issue.number }}
           ISSUE_TITLE: ${{ github.event.issue.title }}
           ISSUE_BODY: ${{ github.event.issue.body }}
           ISSUE_LABELS: ${{ toJson(github.event.issue.labels.*.name) }}
         run: |
-          python -c "
-          import asyncio, json, os, sys
-          sys.path.insert(0, '.')
-          os.environ.setdefault('GITHUB_TOKEN', os.environ.get('GITHUB_TOKEN', ''))
+          python3 -c "
+          import json, os, re
 
-          from app.policy import evaluate_issue
-          from app.models import PolicyVerdict
-
-          title = os.environ['ISSUE_TITLE']
+          title = os.environ.get('ISSUE_TITLE', '')
           body = os.environ.get('ISSUE_BODY', '')
           labels = json.loads(os.environ.get('ISSUE_LABELS', '[]'))
-          issue_num = os.environ['ISSUE_NUMBER']
 
-          decision = evaluate_issue(title, body, labels)
+          # --- Policy Engine (inlined) ---
+
+          CRITICAL_PATHS = ['migrations', 'payments', 'authz', 'secrets', 'security']
+          ACCEPTANCE_CRITERIA_PATTERNS = [
+              r'acceptance criteria', r'expected behavior', r'definition of done',
+              r'## criteria', r'should .+ (when|after|before)',
+          ]
+          HIGH_SIGNALS = [
+              r'race condition', r'concurren', r'deadlock', r'investigate',
+              r'flaky', r'intermittent', r'multiple files', r'cross.?module',
+              r'refactor', r'architect',
+          ]
+          MEDIUM_SIGNALS = [
+              r'deprecat', r'upgrade', r'test.*(fix|fail|broken)', r'cache', r'performance',
+          ]
+          PRIORITY_ESCALATE_LABELS = ['priority:critical', 'critical', 'security']
+          TESTING_SIGNALS = [r'test', r'flaky', r'pytest', r'ci fail', r'coverage']
+          SECURITY_SIGNALS = [r'auth', r'permission', r'cache.*scop', r'role', r'session.*token']
+
+          def has_acceptance_criteria(b):
+              if not b: return False
+              bl = b.lower()
+              return any(re.search(p, bl) for p in ACCEPTANCE_CRITERIA_PATTERNS)
+
+          def touches_critical(b, t):
+              combined = f'{t} {b}'.lower()
+              return any(p in combined for p in CRITICAL_PATHS)
+
+          def estimate_complexity(b):
+              if not b: return 'low'
+              bl = b.lower()
+              high = sum(1 for p in HIGH_SIGNALS if re.search(p, bl))
+              med = sum(1 for p in MEDIUM_SIGNALS if re.search(p, bl))
+              if high >= 2: return 'high'
+              if high >= 1 or med >= 2: return 'medium'
+              return 'low'
+
+          def domain_knowledge(b, t):
+              combined = f'{t} {b}'.lower()
+              k = []
+              if any(re.search(p, combined) for p in TESTING_SIGNALS): k.append('testing-patterns')
+              if any(re.search(p, combined) for p in SECURITY_SIGNALS): k.append('security-context')
+              return k
+
+          # --- Evaluate ---
+          if not has_acceptance_criteria(body):
+              verdict, reason = 'reject', 'missing acceptance criteria'
+              playbook, max_acu, extra = 'standard', '10', []
+          elif any(l.lower().strip() in PRIORITY_ESCALATE_LABELS for l in labels):
+              verdict, reason = 'escalate', 'label indicates critical priority; requires human approval'
+              playbook, max_acu, extra = 'standard', '10', []
+          elif touches_critical(body, title):
+              verdict, reason = 'escalate', 'touches critical path; requires human approval'
+              playbook, max_acu, extra = 'standard', '10', []
+          else:
+              complexity = estimate_complexity(body)
+              extra = domain_knowledge(body, title)
+              if complexity == 'low':
+                  verdict, reason, playbook, max_acu = 'accept', f'accepted (complexity={complexity})', 'standard', '10'
+              elif complexity == 'medium':
+                  verdict, reason, playbook, max_acu = 'accept', f'accepted (complexity={complexity})', 'standard', '30'
+              else:
+                  verdict, reason, playbook, max_acu = 'accept', f'accepted (complexity={complexity})', 'deep-investigation', '50'
 
           with open(os.environ['GITHUB_OUTPUT'], 'a') as f:
-              f.write(f'verdict={decision.verdict.value}\n')
-              f.write(f'reason={decision.reason}\n')
-              f.write(f'playbook={decision.playbook}\n')
-              f.write(f'max_acu={decision.max_acu}\n')
-              f.write(f'extra_knowledge={json.dumps(decision.extra_knowledge)}\n')
+              f.write(f'verdict={verdict}\n')
+              f.write(f'reason={reason}\n')
+              f.write(f'playbook={playbook}\n')
+              f.write(f'max_acu={max_acu}\n')
+              f.write(f'extra_knowledge={json.dumps(extra)}\n')
           "
 
       - name: Comment rejection on issue
@@ -105,14 +140,12 @@ jobs:
           MAX_ACU="${{ steps.dispatch.outputs.max_acu }}"
           EXTRA_KNOWLEDGE='${{ steps.dispatch.outputs.extra_knowledge }}'
 
-          # Select playbook ID based on policy decision
           if [ "$PLAYBOOK" = "deep-investigation" ] && [ -n "$DEVIN_PLAYBOOK_ID_DEEP" ]; then
             SELECTED_PLAYBOOK="$DEVIN_PLAYBOOK_ID_DEEP"
           else
             SELECTED_PLAYBOOK="$DEVIN_PLAYBOOK_ID"
           fi
 
-          # Build knowledge IDs array based on policy decision
           KNOWLEDGE_IDS="[\"$DEVIN_KNOWLEDGE_ID\""
           if echo "$EXTRA_KNOWLEDGE" | grep -q "testing-patterns" && [ -n "$DEVIN_KNOWLEDGE_ID_TESTING" ]; then
             KNOWLEDGE_IDS="$KNOWLEDGE_IDS, \"$DEVIN_KNOWLEDGE_ID_TESTING\""
