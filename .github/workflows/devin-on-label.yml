@@ -1,0 +1,119 @@
+name: Devin Maintenance Remediation
+
+on:
+  issues:
+    types: [labeled]
+
+permissions:
+  contents: read
+  issues: write
+
+jobs:
+  dispatch-to-devin:
+    if: ${{ github.event.label.name == 'devin-ready' }}
+    runs-on: ubuntu-latest
+    steps:
+      - name: Policy check
+        id: policy
+        env:
+          ISSUE_BODY: ${{ github.event.issue.body }}
+        run: |
+          # Check for acceptance criteria
+          if echo "$ISSUE_BODY" | grep -iqE "(acceptance criteria|expected behavior|definition of done|should .+ (when|after|before))"; then
+            echo "has_criteria=true" >> "$GITHUB_OUTPUT"
+          else
+            echo "has_criteria=false" >> "$GITHUB_OUTPUT"
+            echo "::warning::Issue missing acceptance criteria — will be rejected"
+          fi
+
+      - name: Reject if no criteria
+        if: steps.policy.outputs.has_criteria == 'false'
+        env:
+          GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+        run: |
+          gh api repos/${{ github.repository }}/issues/${{ github.event.issue.number }}/comments \
+            -f body="**Policy rejected**: missing acceptance criteria
+
+          This issue will not be dispatched to Devin until acceptance criteria are added to the issue body.
+
+          Please add a section describing the expected behavior after the fix is applied."
+
+      - name: Create Devin session
+        if: steps.policy.outputs.has_criteria == 'true'
+        id: devin
+        env:
+          DEVIN_API_KEY: ${{ secrets.DEVIN_API_KEY }}
+          DEVIN_ORG_ID: ${{ secrets.DEVIN_ORG_ID }}
+          PLAYBOOK_ID: ${{ secrets.DEVIN_PLAYBOOK_ID }}
+          KNOWLEDGE_ID: ${{ secrets.DEVIN_KNOWLEDGE_ID }}
+        run: |
+          ISSUE_NUM="${{ github.event.issue.number }}"
+          ISSUE_TITLE="${{ github.event.issue.title }}"
+          ISSUE_BODY=$(jq -r '.issue.body // ""' "$GITHUB_EVENT_PATH")
+
+          PROMPT="Fix the following issue in the repository ${{ github.repository }}:
+
+          ## Issue #${ISSUE_NUM}: ${ISSUE_TITLE}
+
+          ${ISSUE_BODY}
+
+          ## Instructions
+          - Investigate the codebase to understand the context
+          - Implement a scoped fix
+          - Run relevant tests if possible
+          - Open a PR with a clear description, review focus areas, and any risks"
+
+          PAYLOAD=$(jq -n \
+            --arg prompt "$PROMPT" \
+            --arg title "Issue #${ISSUE_NUM}: ${ISSUE_TITLE}" \
+            --arg playbook_id "$PLAYBOOK_ID" \
+            --arg knowledge_id "$KNOWLEDGE_ID" \
+            '{
+              prompt: $prompt,
+              title: $title,
+              repos: ["${{ github.repository }}"],
+              tags: ["maintenance", "automated", "repo:${{ github.repository }}", "issue:\($ISSUE_NUM)"],
+              max_acu_limit: 50,
+              structured_output_schema: {
+                "type": "object",
+                "properties": {
+                  "status": {"type": "string", "enum": ["success", "partial", "failed"]},
+                  "files_changed": {"type": "array", "items": {"type": "string"}},
+                  "tests_run": {"type": "boolean"},
+                  "test_result": {"type": ["string", "null"]},
+                  "pr_url": {"type": ["string", "null"]},
+                  "risks": {"type": "array", "items": {"type": "string"}},
+                  "review_focus": {"type": ["string", "null"]},
+                  "needs_human_attention": {"type": "boolean"},
+                  "failure_reason": {"type": ["string", "null"]},
+                  "next_action": {"type": "string", "enum": ["review_pr", "rerun_with_more_context", "manual_investigation", "no_action"]}
+                },
+                "required": ["status", "files_changed", "tests_run", "needs_human_attention", "next_action"]
+              },
+              structured_output_required: true
+            } + (if $playbook_id != "" then {playbook_id: $playbook_id} else {} end)
+              + (if $knowledge_id != "" then {knowledge_ids: [$knowledge_id]} else {} end)')
+
+          RESP=$(curl -fSs "https://api.devin.ai/v3/organizations/${DEVIN_ORG_ID}/sessions" \
+            -H "Authorization: Bearer ${DEVIN_API_KEY}" \
+            -H "Content-Type: application/json" \
+            -d "$PAYLOAD")
+
+          SESSION_ID=$(echo "$RESP" | jq -r '.session_id // .id // "unknown"')
+          SESSION_URL=$(echo "$RESP" | jq -r '.url // "https://app.devin.ai/sessions/\(.session_id // .id // "")"')
+
+          echo "session_id=$SESSION_ID" >> "$GITHUB_OUTPUT"
+          echo "session_url=$SESSION_URL" >> "$GITHUB_OUTPUT"
+
+      - name: Comment on issue with session link
+        if: steps.policy.outputs.has_criteria == 'true' && steps.devin.outputs.session_id != ''
+        env:
+          GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+        run: |
+          gh api repos/${{ github.repository }}/issues/${{ github.event.issue.number }}/comments \
+            -f body="**Devin session created** 🤖
+
+          Session: ${{ steps.devin.outputs.session_url }}
+          ACU limit: 50
+
+          Devin is now investigating this issue and will open a PR when ready."
