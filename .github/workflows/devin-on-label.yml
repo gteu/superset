@@ -13,43 +13,114 @@ jobs:
     if: ${{ github.event.label.name == 'devin-ready' }}
     runs-on: ubuntu-latest
     steps:
-      - name: Policy check
-        id: policy
-        env:
-          ISSUE_BODY: ${{ github.event.issue.body }}
-        run: |
-          # Check for acceptance criteria
-          if echo "$ISSUE_BODY" | grep -iqE "(acceptance criteria|expected behavior|definition of done|should .+ (when|after|before))"; then
-            echo "has_criteria=true" >> "$GITHUB_OUTPUT"
-          else
-            echo "has_criteria=false" >> "$GITHUB_OUTPUT"
-            echo "::warning::Issue missing acceptance criteria — will be rejected"
-          fi
+      - name: Checkout repository
+        uses: actions/checkout@v4
 
-      - name: Reject if no criteria
-        if: steps.policy.outputs.has_criteria == 'false'
+      - name: Set up Python
+        uses: actions/setup-python@v5
+        with:
+          python-version: "3.11"
+
+      - name: Install dependencies
+        run: pip install pydantic pydantic-settings httpx
+
+      - name: Run policy engine and dispatch
+        id: dispatch
+        env:
+          DEVIN_API_KEY: ${{ secrets.DEVIN_API_KEY }}
+          DEVIN_ORG_ID: ${{ secrets.DEVIN_ORG_ID }}
+          DEVIN_PLAYBOOK_ID: ${{ secrets.DEVIN_PLAYBOOK_ID }}
+          DEVIN_PLAYBOOK_ID_DEEP: ${{ secrets.DEVIN_PLAYBOOK_ID_DEEP }}
+          DEVIN_KNOWLEDGE_ID: ${{ secrets.DEVIN_KNOWLEDGE_ID }}
+          DEVIN_KNOWLEDGE_ID_TESTING: ${{ secrets.DEVIN_KNOWLEDGE_ID_TESTING }}
+          DEVIN_KNOWLEDGE_ID_SECURITY: ${{ secrets.DEVIN_KNOWLEDGE_ID_SECURITY }}
+          GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+          GITHUB_REPO: ${{ github.repository }}
+          ISSUE_NUMBER: ${{ github.event.issue.number }}
+          ISSUE_TITLE: ${{ github.event.issue.title }}
+          ISSUE_BODY: ${{ github.event.issue.body }}
+          ISSUE_LABELS: ${{ toJson(github.event.issue.labels.*.name) }}
+        run: |
+          python -c "
+          import asyncio, json, os, sys
+          sys.path.insert(0, '.')
+          os.environ.setdefault('GITHUB_TOKEN', os.environ.get('GITHUB_TOKEN', ''))
+
+          from app.policy import evaluate_issue
+          from app.models import PolicyVerdict
+
+          title = os.environ['ISSUE_TITLE']
+          body = os.environ.get('ISSUE_BODY', '')
+          labels = json.loads(os.environ.get('ISSUE_LABELS', '[]'))
+          issue_num = os.environ['ISSUE_NUMBER']
+
+          decision = evaluate_issue(title, body, labels)
+
+          with open(os.environ['GITHUB_OUTPUT'], 'a') as f:
+              f.write(f'verdict={decision.verdict.value}\n')
+              f.write(f'reason={decision.reason}\n')
+              f.write(f'playbook={decision.playbook}\n')
+              f.write(f'max_acu={decision.max_acu}\n')
+              f.write(f'extra_knowledge={json.dumps(decision.extra_knowledge)}\n')
+          "
+
+      - name: Comment rejection on issue
+        if: steps.dispatch.outputs.verdict == 'reject'
         env:
           GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
         run: |
           gh api repos/${{ github.repository }}/issues/${{ github.event.issue.number }}/comments \
-            -f body="**Policy rejected**: missing acceptance criteria
+            -f body="**Policy rejected**: ${{ steps.dispatch.outputs.reason }}
 
-          This issue will not be dispatched to Devin until acceptance criteria are added to the issue body.
+          This issue will not be dispatched to Devin until the criteria are met.
 
-          Please add a section describing the expected behavior after the fix is applied."
+          Please add acceptance criteria describing the expected behavior after the fix."
+
+      - name: Comment escalation on issue
+        if: steps.dispatch.outputs.verdict == 'escalate'
+        env:
+          GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+        run: |
+          gh api repos/${{ github.repository }}/issues/${{ github.event.issue.number }}/comments \
+            -f body="**Escalated**: ${{ steps.dispatch.outputs.reason }}
+
+          This issue requires human approval before Devin dispatch."
 
       - name: Create Devin session
-        if: steps.policy.outputs.has_criteria == 'true'
+        if: steps.dispatch.outputs.verdict == 'accept'
         id: devin
         env:
           DEVIN_API_KEY: ${{ secrets.DEVIN_API_KEY }}
           DEVIN_ORG_ID: ${{ secrets.DEVIN_ORG_ID }}
-          PLAYBOOK_ID: ${{ secrets.DEVIN_PLAYBOOK_ID }}
-          KNOWLEDGE_ID: ${{ secrets.DEVIN_KNOWLEDGE_ID }}
+          DEVIN_PLAYBOOK_ID: ${{ secrets.DEVIN_PLAYBOOK_ID }}
+          DEVIN_PLAYBOOK_ID_DEEP: ${{ secrets.DEVIN_PLAYBOOK_ID_DEEP }}
+          DEVIN_KNOWLEDGE_ID: ${{ secrets.DEVIN_KNOWLEDGE_ID }}
+          DEVIN_KNOWLEDGE_ID_TESTING: ${{ secrets.DEVIN_KNOWLEDGE_ID_TESTING }}
+          DEVIN_KNOWLEDGE_ID_SECURITY: ${{ secrets.DEVIN_KNOWLEDGE_ID_SECURITY }}
         run: |
           ISSUE_NUM="${{ github.event.issue.number }}"
           ISSUE_TITLE="${{ github.event.issue.title }}"
           ISSUE_BODY=$(jq -r '.issue.body // ""' "$GITHUB_EVENT_PATH")
+          PLAYBOOK="${{ steps.dispatch.outputs.playbook }}"
+          MAX_ACU="${{ steps.dispatch.outputs.max_acu }}"
+          EXTRA_KNOWLEDGE='${{ steps.dispatch.outputs.extra_knowledge }}'
+
+          # Select playbook ID based on policy decision
+          if [ "$PLAYBOOK" = "deep-investigation" ] && [ -n "$DEVIN_PLAYBOOK_ID_DEEP" ]; then
+            SELECTED_PLAYBOOK="$DEVIN_PLAYBOOK_ID_DEEP"
+          else
+            SELECTED_PLAYBOOK="$DEVIN_PLAYBOOK_ID"
+          fi
+
+          # Build knowledge IDs array based on policy decision
+          KNOWLEDGE_IDS="[\"$DEVIN_KNOWLEDGE_ID\""
+          if echo "$EXTRA_KNOWLEDGE" | grep -q "testing-patterns" && [ -n "$DEVIN_KNOWLEDGE_ID_TESTING" ]; then
+            KNOWLEDGE_IDS="$KNOWLEDGE_IDS, \"$DEVIN_KNOWLEDGE_ID_TESTING\""
+          fi
+          if echo "$EXTRA_KNOWLEDGE" | grep -q "security-context" && [ -n "$DEVIN_KNOWLEDGE_ID_SECURITY" ]; then
+            KNOWLEDGE_IDS="$KNOWLEDGE_IDS, \"$DEVIN_KNOWLEDGE_ID_SECURITY\""
+          fi
+          KNOWLEDGE_IDS="$KNOWLEDGE_IDS]"
 
           PROMPT="Fix the following issue in the repository ${{ github.repository }}:
 
@@ -66,16 +137,20 @@ jobs:
           PAYLOAD=$(jq -n \
             --arg prompt "$PROMPT" \
             --arg title "Issue #${ISSUE_NUM}: ${ISSUE_TITLE}" \
-            --arg playbook_id "$PLAYBOOK_ID" \
-            --arg knowledge_id "$KNOWLEDGE_ID" \
+            --arg playbook_id "$SELECTED_PLAYBOOK" \
+            --argjson knowledge_ids "$KNOWLEDGE_IDS" \
+            --argjson max_acu "$MAX_ACU" \
             --arg repo "${{ github.repository }}" \
             --arg issue_tag "issue:${ISSUE_NUM}" \
+            --arg complexity "complexity:${PLAYBOOK}" \
             '{
               prompt: $prompt,
               title: $title,
+              playbook_id: $playbook_id,
+              knowledge_ids: $knowledge_ids,
               repos: [$repo],
-              tags: ["maintenance", "automated", ("repo:" + $repo), $issue_tag],
-              max_acu_limit: 50,
+              tags: ["maintenance", "automated", ("repo:" + $repo), $issue_tag, $complexity],
+              max_acu_limit: $max_acu,
               structured_output_schema: {
                 "type": "object",
                 "properties": {
@@ -93,8 +168,7 @@ jobs:
                 "required": ["status", "files_changed", "tests_run", "needs_human_attention", "next_action"]
               },
               structured_output_required: true
-            } + (if $playbook_id != "" then {playbook_id: $playbook_id} else {} end)
-              + (if $knowledge_id != "" then {knowledge_ids: [$knowledge_id]} else {} end)')
+            }')
 
           RESP=$(curl -fSs "https://api.devin.ai/v3/organizations/${DEVIN_ORG_ID}/sessions" \
             -H "Authorization: Bearer ${DEVIN_API_KEY}" \
@@ -108,7 +182,7 @@ jobs:
           echo "session_url=$SESSION_URL" >> "$GITHUB_OUTPUT"
 
       - name: Comment on issue with session link
-        if: steps.policy.outputs.has_criteria == 'true' && steps.devin.outputs.session_id != ''
+        if: steps.dispatch.outputs.verdict == 'accept' && steps.devin.outputs.session_id != ''
         env:
           GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
         run: |
@@ -116,6 +190,8 @@ jobs:
             -f body="**Devin session created** 🤖
 
           Session: ${{ steps.devin.outputs.session_url }}
-          ACU limit: 50
+          Policy: ${{ steps.dispatch.outputs.reason }}
+          Playbook: ${{ steps.dispatch.outputs.playbook }}
+          ACU limit: ${{ steps.dispatch.outputs.max_acu }}
 
           Devin is now investigating this issue and will open a PR when ready."
