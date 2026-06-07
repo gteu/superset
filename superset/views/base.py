@@ -18,6 +18,7 @@ from __future__ import annotations
 
 import copy
 import functools
+import hashlib
 import logging
 import os
 import traceback
@@ -440,12 +441,13 @@ def _get_frontend_config_value(key: str) -> Any:
 
 @cache_manager.cache.memoize(timeout=60)
 def cached_common_bootstrap_data(  # pylint: disable=unused-argument
-    user_id: int | None, locale: str | None
+    user_id: int | None, locale: str | None, roles_hash: str = ""
 ) -> dict[str, Any]:
     """Common data always sent to the client
 
     The function is memoized as the return value only changes when user permissions
-    or configuration values change.
+    or configuration values change. The roles_hash parameter ensures the cache is
+    invalidated when a user's roles or permissions change.
     """
 
     # should not expose API TOKEN to frontend
@@ -543,11 +545,28 @@ def cached_common_bootstrap_data(  # pylint: disable=unused-argument
     return bootstrap_data
 
 
+def _get_user_roles_hash() -> str:
+    """Compute a stable hash of the current user's role IDs.
+
+    This is used as part of the memoize key so that cached bootstrap data is
+    automatically invalidated when a user's roles change.
+    """
+    try:
+        roles = g.user.roles
+        role_ids = sorted(r.id for r in roles if r and r.id is not None)
+    except Exception:  # pylint: disable=broad-except
+        role_ids = []
+    return hashlib.md5(  # noqa: S324
+        ",".join(str(rid) for rid in role_ids).encode()
+    ).hexdigest()
+
+
 def common_bootstrap_payload() -> dict[str, Any]:
     locale = get_locale()
     # Convert locale to string for proper cache key hashing
     locale_str = str(locale) if locale else None
-    return cached_common_bootstrap_data(utils.get_user_id(), locale_str)
+    roles_hash = _get_user_roles_hash()
+    return cached_common_bootstrap_data(utils.get_user_id(), locale_str, roles_hash)
 
 
 def get_spa_payload(extra_data: dict[str, Any] | None = None) -> dict[str, Any]:
