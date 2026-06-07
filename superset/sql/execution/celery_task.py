@@ -472,7 +472,7 @@ def _execute_sql_statements(
         if parsed_script.has_mutation() or query.select_as_cta:
             conn.commit()  # pylint: disable=consider-using-transaction
 
-    total_execution_time_ms = (now_as_float() - execution_start_time) * 1000
+    total_execution_time_ms = now_as_float() - execution_start_time
     _finalize_successful_query(
         query, original_script, execution_results, payload, total_execution_time_ms
     )

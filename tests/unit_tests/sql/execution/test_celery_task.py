@@ -786,6 +786,9 @@ def test_execute_sql_task_success(
     mocker.patch("superset.dataframe.df_to_records", return_value=[])
     mocker.patch("superset.sql.execution.celery_task.security_manager")
     mocker.patch.dict(current_app.config, {"STATS_LOGGER": MagicMock()})
+    mocker.patch(
+        "superset.sql.execution.celery_task.now_as_float", return_value=1000000.0
+    )
 
     setup_mock_raw_connection(mock_database)
 
@@ -804,8 +807,6 @@ def test_execute_sql_task_with_start_time(
     mock_result_set: MagicMock,
 ) -> None:
     """Test execute_sql_task accepts start_time parameter (covers line 400-402)."""
-    import time
-
     from superset.sql.execution.celery_task import execute_sql_task
 
     mock_query.database = mock_database
@@ -824,12 +825,17 @@ def test_execute_sql_task_with_start_time(
     mocker.patch("superset.dataframe.df_to_records", return_value=[])
     mocker.patch("superset.sql.execution.celery_task.security_manager")
     mocker.patch.dict(current_app.config, {"STATS_LOGGER": MagicMock()})
+    mocker.patch(
+        "superset.sql.execution.celery_task.now_as_float", return_value=1000000.0
+    )
 
     from .conftest import setup_mock_raw_connection
 
     setup_mock_raw_connection(mock_database)
 
-    start_time = time.time() - 1.0
+    # start_time uses now_as_float() (milliseconds since epoch) in production,
+    # so use a consistent ms-based value here instead of time.time() (seconds)
+    start_time = 999000.0  # 1 second before mocked now_as_float (1000000.0)
     result = execute_sql_task(123, "SELECT * FROM users", start_time=start_time)
 
     # Verify task completes successfully with start_time
@@ -864,6 +870,9 @@ def test_execute_sql_task_with_cancel_query_id(
     mocker.patch("superset.dataframe.df_to_records", return_value=[])
     mocker.patch("superset.sql.execution.celery_task.security_manager")
     mocker.patch.dict(current_app.config, {"STATS_LOGGER": MagicMock()})
+    mocker.patch(
+        "superset.sql.execution.celery_task.now_as_float", return_value=1000000.0
+    )
 
     from .conftest import setup_mock_raw_connection
 
@@ -898,6 +907,9 @@ def test_execute_sql_task_stopped(
     mocker.patch("superset.sql.execution.celery_task.db.session")
     mocker.patch("superset.sql.execution.celery_task.security_manager")
     mocker.patch.dict(current_app.config, {"STATS_LOGGER": MagicMock()})
+    mocker.patch(
+        "superset.sql.execution.celery_task.now_as_float", return_value=1000000.0
+    )
 
     from .conftest import setup_mock_raw_connection
 
@@ -934,6 +946,9 @@ def test_execute_sql_task_with_mutation(
     mocker.patch("superset.dataframe.df_to_records", return_value=[])
     mocker.patch("superset.sql.execution.celery_task.security_manager")
     mocker.patch.dict(current_app.config, {"STATS_LOGGER": MagicMock()})
+    mocker.patch(
+        "superset.sql.execution.celery_task.now_as_float", return_value=1000000.0
+    )
 
     from .conftest import setup_mock_raw_connection
 
@@ -978,6 +993,9 @@ def test_execute_sql_task_with_results_backend(
     mocker.patch("superset.dataframe.df_to_records", return_value=[])
     mocker.patch("superset.sql.execution.celery_task.security_manager")
     mocker.patch.dict(current_app.config, {"STATS_LOGGER": MagicMock()})
+    mocker.patch(
+        "superset.sql.execution.celery_task.now_as_float", return_value=1000000.0
+    )
 
     from .conftest import setup_mock_raw_connection
 
@@ -1013,6 +1031,9 @@ def test_execute_sql_task_timeout(
     mocker.patch.dict(
         current_app.config,
         {"STATS_LOGGER": MagicMock(), "SQLLAB_ASYNC_TIME_LIMIT_SEC": 300},
+    )
+    mocker.patch(
+        "superset.sql.execution.celery_task.now_as_float", return_value=1000000.0
     )
 
     from .conftest import setup_mock_raw_connection
@@ -1077,6 +1098,9 @@ def test_execute_sql_task_success_final_commit(
     mocker.patch("superset.dataframe.df_to_records", return_value=[])
     mocker.patch("superset.sql.execution.celery_task.security_manager")
     mocker.patch.dict(current_app.config, {"STATS_LOGGER": MagicMock()})
+    mocker.patch(
+        "superset.sql.execution.celery_task.now_as_float", return_value=1000000.0
+    )
 
     from .conftest import setup_mock_raw_connection
 
@@ -1125,6 +1149,9 @@ def test_execute_sql_task_with_failed_status_before_final_commit(
     mocker.patch("superset.dataframe.df_to_records", return_value=[])
     mocker.patch("superset.sql.execution.celery_task.security_manager")
     mocker.patch.dict(current_app.config, {"STATS_LOGGER": MagicMock()})
+    mocker.patch(
+        "superset.sql.execution.celery_task.now_as_float", return_value=1000000.0
+    )
 
     from .conftest import setup_mock_raw_connection
 
